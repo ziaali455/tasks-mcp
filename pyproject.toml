@@ -1,0 +1,24 @@
+[project]
+name = "tasks-mcp"
+version = "0.1.0"
+description = "MCP server exposing Google Tasks (create/list/complete/update/delete) to Claude and ChatGPT"
+authors = [
+    { name = "Ali Zia", email = "ziaali455@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "google-auth>=2.62.0",
+    "google-auth-oauthlib>=1.5.0",
+    "httpx>=0.28.1",
+    "mcp[cli]>=2.3.0",
+    "python-dotenv>=1.2.4",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+tasks-mcp = "tasks_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
