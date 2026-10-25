@@ -11,8 +11,8 @@ from . import auth
 BASE_URL = "https://tasks.googleapis.com/tasks/v1"
 
 
-def _headers() -> dict[str, str]:
-    creds = auth.get_credentials()
+def _headers(user_id: str) -> dict[str, str]:
+    creds = auth.get_credentials(user_id)
     return {"Authorization": f"Bearer {creds.token}"}
 
 
@@ -21,13 +21,14 @@ def _raise_for_status(resp: httpx.Response) -> None:
         raise RuntimeError(f"Google Tasks API error {resp.status_code}: {resp.text}")
 
 
-def list_task_lists() -> list[dict[str, Any]]:
-    resp = httpx.get(f"{BASE_URL}/users/@me/lists", headers=_headers())
+def list_task_lists(user_id: str) -> list[dict[str, Any]]:
+    resp = httpx.get(f"{BASE_URL}/users/@me/lists", headers=_headers(user_id))
     _raise_for_status(resp)
     return resp.json().get("items", [])
 
 
 def list_tasks(
+    user_id: str,
     tasklist_id: str = "@default",
     show_completed: bool = False,
     due_min: str | None = None,
@@ -41,7 +42,7 @@ def list_tasks(
         params["dueMin"] = due_min
     if due_max:
         params["dueMax"] = due_max
-    resp = httpx.get(f"{BASE_URL}/lists/{tasklist_id}/tasks", headers=_headers(), params=params)
+    resp = httpx.get(f"{BASE_URL}/lists/{tasklist_id}/tasks", headers=_headers(user_id), params=params)
     _raise_for_status(resp)
     items = resp.json().get("items", [])
     return [
@@ -59,6 +60,7 @@ def list_tasks(
 
 
 def create_task(
+    user_id: str,
     tasklist_id: str = "@default",
     title: str = "",
     notes: str | None = None,
@@ -69,12 +71,13 @@ def create_task(
         body["notes"] = notes
     if due:
         body["due"] = due
-    resp = httpx.post(f"{BASE_URL}/lists/{tasklist_id}/tasks", headers=_headers(), json=body)
+    resp = httpx.post(f"{BASE_URL}/lists/{tasklist_id}/tasks", headers=_headers(user_id), json=body)
     _raise_for_status(resp)
     return resp.json()
 
 
 def update_task(
+    user_id: str,
     tasklist_id: str,
     task_id: str,
     title: str | None = None,
@@ -88,22 +91,22 @@ def update_task(
         patch["notes"] = notes
     if due is not None:
         patch["due"] = due
-    resp = httpx.patch(f"{BASE_URL}/lists/{tasklist_id}/tasks/{task_id}", headers=_headers(), json=patch)
+    resp = httpx.patch(f"{BASE_URL}/lists/{tasklist_id}/tasks/{task_id}", headers=_headers(user_id), json=patch)
     _raise_for_status(resp)
     return resp.json()
 
 
-def complete_task(tasklist_id: str, task_id: str) -> dict[str, Any]:
+def complete_task(user_id: str, tasklist_id: str, task_id: str) -> dict[str, Any]:
     resp = httpx.patch(
         f"{BASE_URL}/lists/{tasklist_id}/tasks/{task_id}",
-        headers=_headers(),
+        headers=_headers(user_id),
         json={"status": "completed"},
     )
     _raise_for_status(resp)
     return resp.json()
 
 
-def delete_task(tasklist_id: str, task_id: str) -> None:
-    resp = httpx.delete(f"{BASE_URL}/lists/{tasklist_id}/tasks/{task_id}", headers=_headers())
+def delete_task(user_id: str, tasklist_id: str, task_id: str) -> None:
+    resp = httpx.delete(f"{BASE_URL}/lists/{tasklist_id}/tasks/{task_id}", headers=_headers(user_id))
     if resp.status_code != 204:
         _raise_for_status(resp)

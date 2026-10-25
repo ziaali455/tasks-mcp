@@ -9,6 +9,7 @@ from starlette.responses import HTMLResponse, PlainTextResponse, RedirectRespons
 
 load_dotenv()
 
+from mcp.server.auth.middleware.auth_context import get_access_token  # noqa: E402
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions  # noqa: E402
 from mcp.server.mcpserver import MCPServer  # noqa: E402  (after load_dotenv)
 
@@ -18,7 +19,7 @@ _base_url = auth.public_base_url()
 
 mcp = MCPServer(
     name="google-tasks",
-    instructions="Create, list, complete, update and delete the user's Google Tasks.",
+    instructions="Create, list, complete, update and delete the signed-in user's Google Tasks.",
     auth_server_provider=connector_auth.provider,
     auth=AuthSettings(
         issuer_url=_base_url,
@@ -34,6 +35,15 @@ mcp = MCPServer(
 )
 
 
+def _current_user_id() -> str:
+    """The Google account (its `sub`) this request's connector token was issued
+    for — set when that client completed Google sign-in during /authorize."""
+    access_token = get_access_token()
+    if access_token is None or not access_token.subject:
+        raise RuntimeError("No Google account tied to this connection — reconnect the connector.")
+    return access_token.subject
+
+
 @mcp.tool()
 def echo(message: str) -> str:
     """Dummy tool to confirm the server is wired up. Echoes back what you send it."""
@@ -42,21 +52,16 @@ def echo(message: str) -> str:
 
 @mcp.tool()
 def auth_status() -> dict:
-    """Check whether this server is currently connected to a Google account."""
-    base_url = auth.public_base_url()
-    if auth.is_authorized():
-        return {"authorized": True}
-    return {
-        "authorized": False,
-        "login_url": f"{base_url}/oauth/login",
-        "message": "Not connected yet. Tell the user to open the login_url in a browser to authorize.",
-    }
+    """Check whether this connection's Google account still has a usable Tasks token."""
+    user_id = _current_user_id()
+    return {"authorized": auth.is_authorized(user_id)}
 
 
 @mcp.tool()
 def list_task_lists() -> list[dict]:
-    """List the user's Google Tasks lists (id and title), to resolve which list a task belongs to."""
-    return [{"id": tl["id"], "title": tl["title"]} for tl in google_tasks.list_task_lists()]
+    """List the signed-in user's Google Tasks lists (id and title), to resolve which list a task belongs to."""
+    user_id = _current_user_id()
+    return [{"id": tl["id"], "title": tl["title"]} for tl in google_tasks.list_task_lists(user_id)]
 
 
 @mcp.tool()
@@ -77,7 +82,8 @@ def list_tasks(
     Returns each task's id, title, notes, due, status and tasklist_id, so the caller
     can resolve a natural-language reference (e.g. "the dry cleaning one") itself.
     """
-    return google_tasks.list_tasks(tasklist_id, show_completed, due_min, due_max)
+    user_id = _current_user_id()
+    return google_tasks.list_tasks(user_id, tasklist_id, show_completed, due_min, due_max)
 
 
 @mcp.tool()
@@ -96,7 +102,8 @@ def create_task(
         due: Optional RFC3339 due timestamp (e.g. "2026-10-31T00:00:00.000Z"). Google Tasks
             only stores the date part of this, not a time of day.
     """
-    return google_tasks.create_task(tasklist_id, title, notes, due)
+    user_id = _current_user_id()
+    return google_tasks.create_task(user_id, tasklist_id, title, notes, due)
 
 
 @mcp.tool()
@@ -108,24 +115,30 @@ def update_task(
     due: str | None = None,
 ) -> dict:
     """Update fields on an existing Google Task. Only fields you pass are changed."""
-    return google_tasks.update_task(tasklist_id, task_id, title, notes, due)
+    user_id = _current_user_id()
+    return google_tasks.update_task(user_id, tasklist_id, task_id, title, notes, due)
 
 
 @mcp.tool()
 def complete_task(task_id: str, tasklist_id: str = "@default") -> dict:
     """Mark a Google Task as completed."""
-    return google_tasks.complete_task(tasklist_id, task_id)
+    user_id = _current_user_id()
+    return google_tasks.complete_task(user_id, tasklist_id, task_id)
 
 
 @mcp.tool()
 def delete_task(task_id: str, tasklist_id: str = "@default") -> dict:
     """Permanently delete a Google Task."""
-    google_tasks.delete_task(tasklist_id, task_id)
+    user_id = _current_user_id()
+    google_tasks.delete_task(user_id, tasklist_id, task_id)
     return {"deleted": task_id}
 
 
 @mcp.custom_route("/oauth/login", methods=["GET"])
 async def oauth_login(request: Request) -> Response:
+    """Standalone Google sign-in, not tied to a connector client — mainly for
+    manual testing. A connector's own login goes through /authorize instead,
+    which drives the same Google flow but resumes a pending client auth after."""
     return RedirectResponse(auth.build_authorization_url())
 
 
@@ -138,23 +151,19 @@ async def oauth_callback(request: Request) -> Response:
     state = request.query_params.get("state")
     if not code or not state:
         return PlainTextResponse("Missing code or state in callback.", status_code=400)
-    auth.exchange_code_for_token(code, state)
-    return HTMLResponse("<p>Google Tasks connected. You can close this tab.</p>")
+
+    is_connector_login = connector_auth.provider.has_pending(state)
+    user_id, email = auth.exchange_code_for_token(code, state)
+
+    if is_connector_login:
+        redirect_to = connector_auth.provider.complete_login(state, user_id)
+        return RedirectResponse(redirect_to, status_code=303)
+    return HTMLResponse(f"<p>Google Tasks connected as {email}. You can close this tab.</p>")
 
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> Response:
     return PlainTextResponse("ok")
-
-
-@mcp.custom_route("/login", methods=["GET"])
-async def login_get(request: Request) -> Response:
-    return await connector_auth.login_page(request)
-
-
-@mcp.custom_route("/login", methods=["POST"])
-async def login_post(request: Request) -> Response:
-    return await connector_auth.login_submit(request)
 
 
 def _transport_security():

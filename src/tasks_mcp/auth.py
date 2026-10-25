@@ -1,23 +1,37 @@
-"""Google OAuth web flow (hosted, not installed-app) for a single personal user."""
+"""Google OAuth web flow (hosted, not installed-app), generalized to any Google
+account Google itself lets through: while this app's OAuth consent screen is in
+"Testing" status, that's exactly the Test users added in Google Cloud Console —
+Google enforces that restriction before the callback below ever runs.
+
+Each in-flight authorization is keyed by `state`. For a connector login,
+`state` is connector_auth's own request_id, so the same /oauth/callback can
+hand the result back to the right pending connector authorization; for a
+standalone visit to /oauth/login it's just a random nonce.
+"""
 
 from __future__ import annotations
 
 import os
 import secrets
 
+import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 from . import store
 
-SCOPES = ["https://www.googleapis.com/auth/tasks"]
+SCOPES = [
+    "https://www.googleapis.com/auth/tasks",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 
-# CSRF guard + PKCE verifier for the one-user OAuth dance: /oauth/login stores
-# what it generated here, /oauth/callback checks state and reuses the verifier
-# (a fresh Flow has no verifier, and Google requires the one from /login).
-_pending_state: str | None = None
-_pending_code_verifier: str | None = None
+# In-flight PKCE verifiers, keyed by `state`. In-memory only: a flow started
+# before a redeploy just has to be restarted, same tradeoff as everything else
+# here that doesn't survive Render's ephemeral disk.
+_pending_flows: dict[str, str] = {}
 
 
 def _require_env(name: str) -> str:
@@ -50,49 +64,62 @@ def _build_flow(code_verifier: str | None = None) -> Flow:
     )
 
 
-def build_authorization_url() -> str:
-    global _pending_state, _pending_code_verifier
+def build_authorization_url(state: str | None = None) -> str:
+    """Start a Google sign-in. `state` ties the callback back to a pending
+    connector authorization; omit it for a standalone /oauth/login visit."""
+    state = state or secrets.token_urlsafe(24)
     flow = _build_flow()
-    state = secrets.token_urlsafe(24)
-    authorization_url, returned_state = flow.authorization_url(
+    authorization_url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         include_granted_scopes="true",
         state=state,
     )
-    _pending_state = returned_state
-    _pending_code_verifier = flow.code_verifier
+    _pending_flows[state] = flow.code_verifier
     return authorization_url
 
 
-def exchange_code_for_token(code: str, state: str) -> None:
-    if not _pending_state or state != _pending_state:
-        raise RuntimeError("OAuth state mismatch — start the login flow again at /oauth/login")
-    flow = _build_flow(code_verifier=_pending_code_verifier)
+def exchange_code_for_token(code: str, state: str) -> tuple[str, str]:
+    """Exchanges Google's code, persists the token under the signed-in
+    account's Google user id, and returns (user_id, email)."""
+    code_verifier = _pending_flows.pop(state, None)
+    if code_verifier is None:
+        raise RuntimeError("OAuth state mismatch or expired — start the login flow again")
+    flow = _build_flow(code_verifier=code_verifier)
     flow.fetch_token(code=code)
     creds = flow.credentials
+
+    userinfo = httpx.get(USERINFO_URL, headers={"Authorization": f"Bearer {creds.token}"})
+    userinfo.raise_for_status()
+    identity = userinfo.json()
+    user_id = identity["sub"]
+    email = identity.get("email", user_id)
+
     store.save_token_data(
+        user_id,
         {
+            "email": email,
             "token": creds.token,
             "refresh_token": creds.refresh_token,
             "token_uri": creds.token_uri,
             "client_id": creds.client_id,
             "client_secret": creds.client_secret,
             "scopes": creds.scopes,
-        }
+        },
     )
+    return user_id, email
 
 
-def is_authorized() -> bool:
-    return store.load_token_data() is not None
+def is_authorized(user_id: str) -> bool:
+    return store.load_token_data(user_id) is not None
 
 
-def get_credentials() -> Credentials:
-    """Load stored credentials, refreshing the access token if needed."""
-    data = store.load_token_data()
+def get_credentials(user_id: str) -> Credentials:
+    """Load a specific user's stored credentials, refreshing if needed."""
+    data = store.load_token_data(user_id)
     if data is None:
         raise RuntimeError(
-            f"Not connected to Google Tasks yet. Visit {public_base_url()}/oauth/login to authorize."
+            f"This Google account hasn't connected Tasks yet. Visit {public_base_url()}/oauth/login to authorize."
         )
     creds = Credentials(
         token=data.get("token"),
@@ -105,13 +132,15 @@ def get_credentials() -> Credentials:
     if creds.expired and creds.refresh_token:
         creds.refresh(GoogleAuthRequest())
         store.save_token_data(
+            user_id,
             {
+                "email": data.get("email"),
                 "token": creds.token,
                 "refresh_token": creds.refresh_token,
                 "token_uri": creds.token_uri,
                 "client_id": creds.client_id,
                 "client_secret": creds.client_secret,
                 "scopes": creds.scopes,
-            }
+            },
         )
     return creds
