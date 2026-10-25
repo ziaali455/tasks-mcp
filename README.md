@@ -14,11 +14,18 @@ create, list, complete, update and delete your Google Tasks by chatting with it.
 - `complete_task(task_id, tasklist_id)`
 - `delete_task(task_id, tasklist_id)`
 
+There are two separate OAuth hops here, easy to conflate: Google's (this server
+gets permission to touch *your* Google Tasks — `/oauth/login`) and the
+connector's (an MCP client like Claude gets permission to talk to *this
+server* — `/login`, gated by `MCP_AUTH_TOKEN`). Claude's and ChatGPT's custom
+connector UIs require the second one; they won't connect to a fully open
+MCP server.
+
 ## Local development
 
 ```bash
 uv sync
-cp .env.example .env   # fill in GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+cp .env.example .env   # fill in GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / MCP_AUTH_TOKEN
 uv run tasks-mcp
 ```
 
@@ -40,7 +47,8 @@ Not required — the deployed version is what you'll actually connect Claude/Cha
 3. Set environment variables on the service (Render dashboard → Environment):
    - `GOOGLE_CLIENT_ID`
    - `GOOGLE_CLIENT_SECRET`
-   - `MCP_AUTH_TOKEN` (optional — see Security below)
+   - `MCP_AUTH_TOKEN` — the password required at the connector's own `/login` page
+     (see Security below). Pick a long random string.
 4. Deploy. Note the assigned URL, e.g. `https://tasks-mcp-xxxx.onrender.com`.
    `GOOGLE_REDIRECT_URI` / `PUBLIC_BASE_URL` don't need to be set — they're derived
    from Render's own `RENDER_EXTERNAL_URL` env var.
@@ -50,7 +58,9 @@ Not required — the deployed version is what you'll actually connect Claude/Cha
    Google account you added as a Test user, and grant access.
 7. Add the connector in Claude (claude.ai → Settings → Connectors → Add custom
    connector) or ChatGPT (Settings → Connectors → Create, Developer mode) using
-   `https://<your-render-url>/mcp` as the server URL.
+   `https://<your-render-url>/mcp` as the server URL. The client will walk you
+   through its own OAuth popup: that's this server's `/login` page, asking for
+   `MCP_AUTH_TOKEN` — not your Google password.
 
 ## Free-tier caveats
 
@@ -64,8 +74,12 @@ Not required — the deployed version is what you'll actually connect Claude/Cha
 
 ## Security note
 
-The `/mcp` endpoint itself has no authentication by default — anyone who finds the
-Render URL could call these tools against your Google Tasks. Set `MCP_AUTH_TOKEN`
-on the Render service to require an `Authorization: Bearer <token>` header; only
-use this if the MCP client you're connecting (Claude/ChatGPT) lets you set a custom
-header for the connector. Otherwise, treat the Render URL itself as a secret.
+`/mcp` is protected by a real (if minimal) OAuth 2.1 authorization server this
+project implements on itself (dynamic client registration + PKCE authorization
+code), which is what lets Claude/ChatGPT treat it as a proper connector rather
+than refusing it as unauthenticated. The actual gate is `MCP_AUTH_TOKEN`: it's
+the password required at `/login` before a client is issued a token. Anyone can
+*register* as a client (that's normal for DCR) and reach the login form, but
+without the password they get no token and can't call any tool. Access tokens
+last 30 days or until the service redeploys (in-memory, same tradeoff as the
+Google token store) and aren't refreshable — reconnect the client when one expires.

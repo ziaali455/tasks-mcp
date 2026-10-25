@@ -9,13 +9,28 @@ from starlette.responses import HTMLResponse, PlainTextResponse, RedirectRespons
 
 load_dotenv()
 
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions  # noqa: E402
 from mcp.server.mcpserver import MCPServer  # noqa: E402  (after load_dotenv)
 
-from . import auth, google_tasks  # noqa: E402
+from . import auth, connector_auth, google_tasks  # noqa: E402
+
+_base_url = auth.public_base_url()
 
 mcp = MCPServer(
     name="google-tasks",
     instructions="Create, list, complete, update and delete the user's Google Tasks.",
+    auth_server_provider=connector_auth.provider,
+    auth=AuthSettings(
+        issuer_url=_base_url,
+        resource_server_url=f"{_base_url}/mcp",
+        validate_token_resource=False,
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=connector_auth.SCOPES,
+            default_scopes=connector_auth.SCOPES,
+        ),
+        required_scopes=connector_auth.SCOPES,
+    ),
 )
 
 
@@ -132,29 +147,14 @@ async def health(request: Request) -> Response:
     return PlainTextResponse("ok")
 
 
-class BearerAuthMiddleware:
-    """Optional static-token gate for the /mcp endpoint, set via MCP_AUTH_TOKEN.
+@mcp.custom_route("/login", methods=["GET"])
+async def login_get(request: Request) -> Response:
+    return await connector_auth.login_page(request)
 
-    Off by default (no env var set) since some MCP clients can't send custom
-    headers; the real access control is Google OAuth itself. When set, requires
-    `Authorization: Bearer <token>` on everything except the OAuth/health routes.
-    """
 
-    def __init__(self, app, token: str):
-        self.app = app
-        self.token = token
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"].startswith(("/oauth/", "/health")):
-            await self.app(scope, receive, send)
-            return
-        headers = dict(scope.get("headers") or [])
-        auth_header = headers.get(b"authorization", b"").decode()
-        if auth_header != f"Bearer {self.token}":
-            response = PlainTextResponse("Unauthorized", status_code=401)
-            await response(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
+@mcp.custom_route("/login", methods=["POST"])
+async def login_post(request: Request) -> Response:
+    return await connector_auth.login_submit(request)
 
 
 def _transport_security():
@@ -172,11 +172,7 @@ def _transport_security():
 
 
 def build_app() -> Starlette:
-    app = mcp.streamable_http_app(transport_security=_transport_security())
-    token = os.environ.get("MCP_AUTH_TOKEN")
-    if token:
-        app = BearerAuthMiddleware(app, token)
-    return app
+    return mcp.streamable_http_app(transport_security=_transport_security())
 
 
 app = build_app()
