@@ -58,6 +58,22 @@ Not required — the deployed version is what you'll actually connect Claude/Cha
 
 ## Deploying to Render (free tier)
 
+### Quickest path: the setup wizard
+
+```bash
+uv run python scripts/setup.py
+```
+
+Walks you through all of the steps below interactively: the Google Cloud
+Console setup (that part's manual — Google doesn't expose an API for creating
+an OAuth client, so the wizard opens each page and tells you what to click),
+then pushing to GitHub and deploying to Render, which it automates for you if
+you give it a Render API key (from
+[dashboard.render.com/u/settings#api-keys](https://dashboard.render.com/u/settings#api-keys)).
+Without a key it just prints the manual steps instead. Safe to re-run.
+
+### Manual steps
+
 1. Push this repo to GitHub.
 2. In the Render dashboard: New → Web Service → connect the repo. Render should pick
    up `render.yaml` automatically (Blueprint); if not, set manually:
