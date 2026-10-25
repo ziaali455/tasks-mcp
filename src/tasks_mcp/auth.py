@@ -13,9 +13,11 @@ from . import store
 
 SCOPES = ["https://www.googleapis.com/auth/tasks"]
 
-# CSRF guard for the one-user OAuth dance: /oauth/login stores the state it
-# generated here, /oauth/callback checks the one it got back against it.
+# CSRF guard + PKCE verifier for the one-user OAuth dance: /oauth/login stores
+# what it generated here, /oauth/callback checks state and reuses the verifier
+# (a fresh Flow has no verifier, and Google requires the one from /login).
 _pending_state: str | None = None
+_pending_code_verifier: str | None = None
 
 
 def _require_env(name: str) -> str:
@@ -34,7 +36,7 @@ def _redirect_uri() -> str:
     return os.environ.get("GOOGLE_REDIRECT_URI") or f"{public_base_url()}/oauth/callback"
 
 
-def _build_flow() -> Flow:
+def _build_flow(code_verifier: str | None = None) -> Flow:
     client_config = {
         "web": {
             "client_id": _require_env("GOOGLE_CLIENT_ID"),
@@ -43,11 +45,13 @@ def _build_flow() -> Flow:
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
-    return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=_redirect_uri())
+    return Flow.from_client_config(
+        client_config, scopes=SCOPES, redirect_uri=_redirect_uri(), code_verifier=code_verifier
+    )
 
 
 def build_authorization_url() -> str:
-    global _pending_state
+    global _pending_state, _pending_code_verifier
     flow = _build_flow()
     state = secrets.token_urlsafe(24)
     authorization_url, returned_state = flow.authorization_url(
@@ -57,13 +61,14 @@ def build_authorization_url() -> str:
         state=state,
     )
     _pending_state = returned_state
+    _pending_code_verifier = flow.code_verifier
     return authorization_url
 
 
 def exchange_code_for_token(code: str, state: str) -> None:
     if not _pending_state or state != _pending_state:
         raise RuntimeError("OAuth state mismatch — start the login flow again at /oauth/login")
-    flow = _build_flow()
+    flow = _build_flow(code_verifier=_pending_code_verifier)
     flow.fetch_token(code=code)
     creds = flow.credentials
     store.save_token_data(
