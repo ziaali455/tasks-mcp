@@ -157,8 +157,22 @@ class BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+def _transport_security():
+    from urllib.parse import urlsplit
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    host = urlsplit(auth.public_base_url()).netloc
+    allowed_hosts = {host, "localhost:8000", "127.0.0.1:8000"}
+    allowed_origins = {auth.public_base_url(), "http://localhost:8000", "http://127.0.0.1:8000"}
+    return TransportSecuritySettings(
+        allowed_hosts=list(allowed_hosts),
+        allowed_origins=list(allowed_origins),
+    )
+
+
 def build_app() -> Starlette:
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(transport_security=_transport_security())
     token = os.environ.get("MCP_AUTH_TOKEN")
     if token:
         app = BearerAuthMiddleware(app, token)
