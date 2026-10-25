@@ -86,8 +86,20 @@ def exchange_code_for_token(code: str, state: str) -> tuple[str, str]:
     if code_verifier is None:
         raise RuntimeError("OAuth state mismatch or expired — start the login flow again")
     flow = _build_flow(code_verifier=code_verifier)
+    # Some Google Workspace admins block specific scopes (e.g. Tasks) for
+    # third-party apps without an explicit error — Google just grants fewer
+    # scopes than requested. oauthlib treats that mismatch as fatal unless
+    # told not to; we'd rather check creds.scopes ourselves and report it clearly.
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
     flow.fetch_token(code=code)
     creds = flow.credentials
+    if "https://www.googleapis.com/auth/tasks" not in (creds.scopes or []):
+        raise RuntimeError(
+            "Google signed you in but did not grant Tasks access for this account — "
+            "likely blocked by its Google Workspace admin (common for school/work accounts). "
+            "Try a personal Google account instead, or ask your Workspace admin to allow "
+            "this app's access to the Tasks API."
+        )
 
     userinfo = httpx.get(USERINFO_URL, headers={"Authorization": f"Bearer {creds.token}"})
     userinfo.raise_for_status()

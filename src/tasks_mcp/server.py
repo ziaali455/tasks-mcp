@@ -153,7 +153,10 @@ async def oauth_callback(request: Request) -> Response:
         return PlainTextResponse("Missing code or state in callback.", status_code=400)
 
     is_connector_login = connector_auth.provider.has_pending(state)
-    user_id, email = auth.exchange_code_for_token(code, state)
+    try:
+        user_id, email = auth.exchange_code_for_token(code, state)
+    except Exception as e:
+        return HTMLResponse(f"<p>Couldn't connect Google Tasks: {e}</p>", status_code=400)
 
     if is_connector_login:
         redirect_to = connector_auth.provider.complete_login(state, user_id)
